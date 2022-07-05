@@ -1,15 +1,113 @@
+from PyQt5.QtWidgets import QApplication, QWidget, QGridLayout, QVBoxLayout, QLabel, QGroupBox
+from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QThread
+from PyQt5.QtGui import QPixmap
+import PyQt5.QtGui
+from qtrangeslider import QRangeSlider
 import pyrealsense2 as rs
 import numpy as np
 import cv2
 import argparse
+import sys
+
+MAX_DISTANCE = 150
+MIN_DISTANCE = 30
 
 
-class align_rgb_over_depth:
+class Window(QWidget):
+    def __init__(self):
+        super().__init__()
+        grid_layout = QGridLayout()
+        grid_layout.addWidget(self.create_range_slider(), 0, 0)
+        self.setLayout(grid_layout)
+        self.setWindowTitle("SmartIR")
+        self.setFixedSize(1200, 480)
+
+        self.disply_width = 640
+        self.display_height = 480
+
+        self.image_label = QLabel(self)
+        self.image_label.resize(self.disply_width, self.display_height)
+        self.text_label = QLabel("Camera")
+
+        vertical_box = QVBoxLayout()
+        vertical_box.addWidget(self.image_label)
+        vertical_box.addWidget(self.text_label)
+        grid_layout.addLayout(vertical_box, 0, 1)
+
+        self.min_distance = MIN_DISTANCE
+        self.max_distance = MAX_DISTANCE
+
+        self.thread = align_rgb_over_depth()
+        self.thread.change_pixmap_signal.connect(self.update_image)
+        self.thread.start()
+
+    def closeEvent(self, event):
+        self.thread.stop()
+        event.accept()
+
+    @pyqtSlot(np.ndarray)
+    def update_image(self, cv_img):
+        qt_img = self.convert_cv_qt(cv_img)
+        self.image_label.setPixmap(qt_img)
+
+    def convert_cv_qt(self, cv_img):
+        rgb_image = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb_image.shape
+        bytes_per_line = ch * w
+        convert_to_Qt_format = PyQt5.QtGui.QImage(rgb_image.data, w, h, bytes_per_line,
+                                                  PyQt5.QtGui.QImage.Format_RGB888)
+        p = convert_to_Qt_format.scaled(self.disply_width, self.display_height, Qt.KeepAspectRatio)
+        return QPixmap.fromImage(p)
+
+    def create_range_slider(self):
+        self.groupBox = QGroupBox("Align RGB over Depth")
+        self.slider = QRangeSlider(Qt.Horizontal)
+        self.slider.valueChanged.connect(self.change_val)
+        self.slider.show()
+
+        self.label_title = QLabel(self)
+        self.label_title.setText("Kullanılacak Aralığı Ayarlayınız.")
+
+        self.label_min_text = QLabel(self)
+        self.label_max_text = QLabel(self)
+
+        self.label_min_text.setText("Min : ")
+        self.label_max_text.setText("Max : ")
+
+        self.label_value_min = QLabel(self)
+        self.label_value_max = QLabel(self)
+
+        self.horizontal_box = QGridLayout()
+        self.horizontal_box.addWidget(self.label_min_text, 0, 0)
+        self.horizontal_box.addWidget(self.label_value_min, 0, 1)
+        self.horizontal_box.addWidget(self.label_max_text, 0, 2)
+        self.horizontal_box.addWidget(self.label_value_max, 0, 3)
+
+        self.vertival_box = QVBoxLayout()
+        self.vertival_box.addWidget(self.label_title)
+        self.vertival_box.addWidget(self.slider)
+        self.vertival_box.addLayout(self.horizontal_box)
+        self.groupBox.setLayout(self.vertival_box)
+
+        return self.groupBox
+
+    def change_val(self, value):
+        global MAX_DISTANCE
+        global MIN_DISTANCE
+        self.min_distance = int((value[0] + 1) * 4.7)
+        self.max_distance = int((value[1] + 1) * 4.7)
+        MAX_DISTANCE = self.max_distance
+        MIN_DISTANCE = self.min_distance
+        self.label_value_min.setText(str(30 + self.min_distance))
+        self.label_value_max.setText(str(30 + self.max_distance))
+
+
+class align_rgb_over_depth(QThread):
+    change_pixmap_signal = pyqtSignal(np.ndarray)
+
     def __init__(self, display_status: bool = False,
-                 min_distance_in_meter: float = 0.5,
-                 # from_file_status: bool = False,
-                 max_distance_in_meter: float = 1.5,
-                 rgb_queue = None):
+                 rgb_queue=None):
+        super().__init__()
         self.DEPTH_RESOLUTION_WIDTH = 640
         self.DEPTH_RESOLUTION_HEIGHT = 480
         self.DEPTH_FRAME_RATE = 30
@@ -18,17 +116,20 @@ class align_rgb_over_depth:
         self.RGB_RESOLUTION_HEIGHT = 480
         self.RGB_FRAME_RATE = 30
 
+        self._run_flag = True
+
         # self.SAMPLE_FILE_PATH = 'd435i_sample_data/d435i_walking.bag'
         self.WINDOW_TITLE = "Align RGB over Depth"
         self.DISPLAY_STATUS = display_status
         self.RGB_QUEUE = rgb_queue
 
-        self.min_clipping_distance_in_meters = min_distance_in_meter
-        self.max_clipping_distance_in_meters = max_distance_in_meter
+        self.min_clipping_distance_in_meters = float(MIN_DISTANCE / 100)
+        self.max_clipping_distance_in_meters = float(MAX_DISTANCE / 100)
 
         self.pipeline = rs.pipeline()
-        print("Calisma araligi", "Min: ", self.min_clipping_distance_in_meters, " - Max: ",
-              self.max_clipping_distance_in_meters)
+        print("Calisma araligi varsayilan ",
+              "Min: ", self.min_clipping_distance_in_meters, " - ",
+              "Max: ", self.max_clipping_distance_in_meters)
 
         self.config = rs.config()
         # rs.config.enable_device_from_file(self.config, self.SAMPLE_FILE_PATH, repeat_playback=False)
@@ -53,16 +154,18 @@ class align_rgb_over_depth:
         self.depth_scale = self.depth_sensor.get_depth_scale()
         # print("Depth Scale is: ", self.depth_scale)
 
-        self.max_clipping_distance = self.max_clipping_distance_in_meters / self.depth_scale
-        self.min_clipping_distance = self.min_clipping_distance_in_meters / self.depth_scale
-
         self.align_to = rs.stream.color
         self.align = rs.align(self.align_to)
         if self.DISPLAY_STATUS:
             cv2.namedWindow(self.WINDOW_TITLE, cv2.WINDOW_AUTOSIZE)
 
-    def start(self):
-        while True:
+    def run(self):
+        while self._run_flag:
+            self.min_clipping_distance_in_meters = float(MIN_DISTANCE / 100)
+            self.max_clipping_distance_in_meters = float(MAX_DISTANCE / 100)
+            self.max_clipping_distance = self.max_clipping_distance_in_meters / self.depth_scale
+            self.min_clipping_distance = self.min_clipping_distance_in_meters / self.depth_scale
+
             frames = self.pipeline.wait_for_frames()
 
             aligned_frames = self.align.process(frames)
@@ -80,7 +183,9 @@ class align_rgb_over_depth:
             depth_image_3d = np.dstack((depth_image, depth_image, depth_image))
             bg_removed = np.where(
                 ((depth_image_3d > self.max_clipping_distance) | (depth_image_3d < self.min_clipping_distance)) | (
-                            depth_image_3d <= 0), grey_color, color_image)
+                        depth_image_3d <= 0), grey_color, color_image)
+
+            self.change_pixmap_signal.emit(bg_removed)
 
             if self.RGB_QUEUE:
                 self.RGB_QUEUE.put(item=bg_removed, block=True)
@@ -96,6 +201,8 @@ class align_rgb_over_depth:
 
     def stop(self):
         self.pipeline.stop()
+        self._run_flag = False
+        self.wait()
 
 
 if __name__ == "__main__":
@@ -111,15 +218,8 @@ if __name__ == "__main__":
     args = vars(parser.parse_args())
 
     align_obj = None
+    app = QApplication(sys.argv)
 
-    try:
-        align_obj = align_rgb_over_depth(display_status=args["display"],
-                                         max_distance_in_meter=args["maxclippingdistance"],
-                                         min_distance_in_meter=args["minclippingdistance"])
-        align_obj.start()
-
-    except KeyboardInterrupt:
-        print("Interrupted -> Align RGB over Depth")
-        align_obj.stop()
-        exit(1)
-
+    slider = Window()
+    slider.show()
+    sys.exit(app.exec_())
